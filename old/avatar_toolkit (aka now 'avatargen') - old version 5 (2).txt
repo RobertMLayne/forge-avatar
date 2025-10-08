@@ -1,0 +1,1949 @@
+
+--- .git\config ---
+[core]
+	repositoryformatversion = 0
+	filemode = false
+	bare = false
+	logallrefupdates = true
+	symlinks = false
+	ignorecase = true
+
+--- .git\description ---
+Unnamed repository; edit this file 'description' to name the repository.
+
+--- .git\HEAD ---
+ref: refs/heads/master
+
+--- .git\hooks\applypatch-msg.sample ---
+#!/bin/sh
+#
+# An example hook script to check the commit log message taken by
+# applypatch from an e-mail message.
+#
+# The hook should exit with non-zero status after issuing an
+# appropriate message if it wants to stop the commit.  The hook is
+# allowed to edit the commit message file.
+#
+# To enable this hook, rename this file to "applypatch-msg".
+
+. git-sh-setup
+commitmsg="$(git rev-parse --git-path hooks/commit-msg)"
+test -x "$commitmsg" && exec "$commitmsg" ${1+"$@"}
+:
+
+--- .git\hooks\commit-msg.sample ---
+#!/bin/sh
+#
+# An example hook script to check the commit log message.
+# Called by "git commit" with one argument, the name of the file
+# that has the commit message.  The hook should exit with non-zero
+# status after issuing an appropriate message if it wants to stop the
+# commit.  The hook is allowed to edit the commit message file.
+#
+# To enable this hook, rename this file to "commit-msg".
+
+# Uncomment the below to add a Signed-off-by line to the message.
+# Doing this in a hook is a bad idea in general, but the prepare-commit-msg
+# hook is more suited to it.
+#
+# SOB=$(git var GIT_AUTHOR_IDENT | sed -n 's/^\(.*>\).*$/Signed-off-by: \1/p')
+# grep -qs "^$SOB" "$1" || echo "$SOB" >> "$1"
+
+# This example catches duplicate Signed-off-by lines.
+
+test "" = "$(grep '^Signed-off-by: ' "$1" |
+	 sort | uniq -c | sed -e '/^[ 	]*1[ 	]/d')" || {
+	echo >&2 Duplicate Signed-off-by lines.
+	exit 1
+}
+
+--- .git\hooks\fsmonitor-watchman.sample ---
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use IPC::Open2;
+
+# An example hook script to integrate Watchman
+# (https://facebook.github.io/watchman/) with git to speed up detecting
+# new and modified files.
+#
+# The hook is passed a version (currently 2) and last update token
+# formatted as a string and outputs to stdout a new update token and
+# all files that have been modified since the update token. Paths must
+# be relative to the root of the working tree and separated by a single NUL.
+#
+# To enable this hook, rename this file to "query-watchman" and set
+# 'git config core.fsmonitor .git/hooks/query-watchman'
+#
+my ($version, $last_update_token) = @ARGV;
+
+# Uncomment for debugging
+# print STDERR "$0 $version $last_update_token\n";
+
+# Check the hook interface version
+if ($version ne 2) {
+	die "Unsupported query-fsmonitor hook version '$version'.\n" .
+	    "Falling back to scanning...\n";
+}
+
+my $git_work_tree = get_working_dir();
+
+my $retry = 1;
+
+my $json_pkg;
+eval {
+	require JSON::XS;
+	$json_pkg = "JSON::XS";
+	1;
+} or do {
+	require JSON::PP;
+	$json_pkg = "JSON::PP";
+};
+
+launch_watchman();
+
+sub launch_watchman {
+	my $o = watchman_query();
+	if (is_work_tree_watched($o)) {
+		output_result($o->{clock}, @{$o->{files}});
+	}
+}
+
+sub output_result {
+	my ($clockid, @files) = @_;
+
+	# Uncomment for debugging watchman output
+	# open (my $fh, ">", ".git/watchman-output.out");
+	# binmode $fh, ":utf8";
+	# print $fh "$clockid\n@files\n";
+	# close $fh;
+
+	binmode STDOUT, ":utf8";
+	print $clockid;
+	print "\0";
+	local $, = "\0";
+	print @files;
+}
+
+sub watchman_clock {
+	my $response = qx/watchman clock "$git_work_tree"/;
+	die "Failed to get clock id on '$git_work_tree'.\n" .
+		"Falling back to scanning...\n" if $? != 0;
+
+	return $json_pkg->new->utf8->decode($response);
+}
+
+sub watchman_query {
+	my $pid = open2(\*CHLD_OUT, \*CHLD_IN, 'watchman -j --no-pretty')
+	or die "open2() failed: $!\n" .
+	"Falling back to scanning...\n";
+
+	# In the query expression below we're asking for names of files that
+	# changed since $last_update_token but not from the .git folder.
+	#
+	# To accomplish this, we're using the "since" generator to use the
+	# recency index to select candidate nodes and "fields" to limit the
+	# output to file names only. Then we're using the "expression" term to
+	# further constrain the results.
+	my $last_update_line = "";
+	if (substr($last_update_token, 0, 1) eq "c") {
+		$last_update_token = "\"$last_update_token\"";
+		$last_update_line = qq[\n"since": $last_update_token,];
+	}
+	my $query = <<"	END";
+		["query", "$git_work_tree", {$last_update_line
+			"fields": ["name"],
+			"expression": ["not", ["dirname", ".git"]]
+		}]
+	END
+
+	# Uncomment for debugging the watchman query
+	# open (my $fh, ">", ".git/watchman-query.json");
+	# print $fh $query;
+	# close $fh;
+
+	print CHLD_IN $query;
+	close CHLD_IN;
+	my $response = do {local $/; <CHLD_OUT>};
+
+	# Uncomment for debugging the watch response
+	# open ($fh, ">", ".git/watchman-response.json");
+	# print $fh $response;
+	# close $fh;
+
+	die "Watchman: command returned no output.\n" .
+	"Falling back to scanning...\n" if $response eq "";
+	die "Watchman: command returned invalid output: $response\n" .
+	"Falling back to scanning...\n" unless $response =~ /^\{/;
+
+	return $json_pkg->new->utf8->decode($response);
+}
+
+sub is_work_tree_watched {
+	my ($output) = @_;
+	my $error = $output->{error};
+	if ($retry > 0 and $error and $error =~ m/unable to resolve root .* directory (.*) is not watched/) {
+		$retry--;
+		my $response = qx/watchman watch "$git_work_tree"/;
+		die "Failed to make watchman watch '$git_work_tree'.\n" .
+		    "Falling back to scanning...\n" if $? != 0;
+		$output = $json_pkg->new->utf8->decode($response);
+		$error = $output->{error};
+		die "Watchman: $error.\n" .
+		"Falling back to scanning...\n" if $error;
+
+		# Uncomment for debugging watchman output
+		# open (my $fh, ">", ".git/watchman-output.out");
+		# close $fh;
+
+		# Watchman will always return all files on the first query so
+		# return the fast "everything is dirty" flag to git and do the
+		# Watchman query just to get it over with now so we won't pay
+		# the cost in git to look up each individual file.
+		my $o = watchman_clock();
+		$error = $output->{error};
+
+		die "Watchman: $error.\n" .
+		"Falling back to scanning...\n" if $error;
+
+		output_result($o->{clock}, ("/"));
+		$last_update_token = $o->{clock};
+
+		eval { launch_watchman() };
+		return 0;
+	}
+
+	die "Watchman: $error.\n" .
+	"Falling back to scanning...\n" if $error;
+
+	return 1;
+}
+
+sub get_working_dir {
+	my $working_dir;
+	if ($^O =~ 'msys' || $^O =~ 'cygwin') {
+		$working_dir = Win32::GetCwd();
+		$working_dir =~ tr/\\/\//;
+	} else {
+		require Cwd;
+		$working_dir = Cwd::cwd();
+	}
+
+	return $working_dir;
+}
+
+--- .git\hooks\post-update.sample ---
+#!/bin/sh
+#
+# An example hook script to prepare a packed repository for use over
+# dumb transports.
+#
+# To enable this hook, rename this file to "post-update".
+
+exec git update-server-info
+
+--- .git\hooks\pre-applypatch.sample ---
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed
+# by applypatch from an e-mail message.
+#
+# The hook should exit with non-zero status after issuing an
+# appropriate message if it wants to stop the commit.
+#
+# To enable this hook, rename this file to "pre-applypatch".
+
+. git-sh-setup
+precommit="$(git rev-parse --git-path hooks/pre-commit)"
+test -x "$precommit" && exec "$precommit" ${1+"$@"}
+:
+
+--- .git\hooks\pre-commit.sample ---
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed.
+# Called by "git commit" with no arguments.  The hook should
+# exit with non-zero status after issuing an appropriate message if
+# it wants to stop the commit.
+#
+# To enable this hook, rename this file to "pre-commit".
+
+if git rev-parse --verify HEAD >/dev/null 2>&1
+then
+	against=HEAD
+else
+	# Initial commit: diff against an empty tree object
+	against=$(git hash-object -t tree /dev/null)
+fi
+
+# If you want to allow non-ASCII filenames set this variable to true.
+allownonascii=$(git config --type=bool hooks.allownonascii)
+
+# Redirect output to stderr.
+exec 1>&2
+
+# Cross platform projects tend to avoid non-ASCII filenames; prevent
+# them from being added to the repository. We exploit the fact that the
+# printable range starts at the space character and ends with tilde.
+if [ "$allownonascii" != "true" ] &&
+	# Note that the use of brackets around a tr range is ok here, (it's
+	# even required, for portability to Solaris 10's /usr/bin/tr), since
+	# the square bracket bytes happen to fall in the designated range.
+	test $(git diff-index --cached --name-only --diff-filter=A -z $against |
+	  LC_ALL=C tr -d '[ -~]\0' | wc -c) != 0
+then
+	cat <<\EOF
+Error: Attempt to add a non-ASCII file name.
+
+This can cause problems if you want to work with people on other platforms.
+
+To be portable it is advisable to rename the file.
+
+If you know what you are doing you can disable this check using:
+
+  git config hooks.allownonascii true
+EOF
+	exit 1
+fi
+
+# If there are whitespace errors, print the offending file names and fail.
+exec git diff-index --check --cached $against --
+
+--- .git\hooks\pre-merge-commit.sample ---
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed.
+# Called by "git merge" with no arguments.  The hook should
+# exit with non-zero status after issuing an appropriate message to
+# stderr if it wants to stop the merge commit.
+#
+# To enable this hook, rename this file to "pre-merge-commit".
+
+. git-sh-setup
+test -x "$GIT_DIR/hooks/pre-commit" &&
+        exec "$GIT_DIR/hooks/pre-commit"
+:
+
+--- .git\hooks\pre-push.sample ---
+#!/bin/sh
+
+# An example hook script to verify what is about to be pushed.  Called by "git
+# push" after it has checked the remote status, but before anything has been
+# pushed.  If this script exits with a non-zero status nothing will be pushed.
+#
+# This hook is called with the following parameters:
+#
+# $1 -- Name of the remote to which the push is being done
+# $2 -- URL to which the push is being done
+#
+# If pushing without using a named remote those arguments will be equal.
+#
+# Information about the commits which are being pushed is supplied as lines to
+# the standard input in the form:
+#
+#   <local ref> <local oid> <remote ref> <remote oid>
+#
+# This sample shows how to prevent push of commits where the log message starts
+# with "WIP" (work in progress).
+
+remote="$1"
+url="$2"
+
+zero=$(git hash-object --stdin </dev/null | tr '[0-9a-f]' '0')
+
+while read local_ref local_oid remote_ref remote_oid
+do
+	if test "$local_oid" = "$zero"
+	then
+		# Handle delete
+		:
+	else
+		if test "$remote_oid" = "$zero"
+		then
+			# New branch, examine all commits
+			range="$local_oid"
+		else
+			# Update to existing branch, examine new commits
+			range="$remote_oid..$local_oid"
+		fi
+
+		# Check for WIP commit
+		commit=$(git rev-list -n 1 --grep '^WIP' "$range")
+		if test -n "$commit"
+		then
+			echo >&2 "Found WIP commit in $local_ref, not pushing"
+			exit 1
+		fi
+	fi
+done
+
+exit 0
+
+--- .git\hooks\pre-rebase.sample ---
+#!/bin/sh
+#
+# Copyright (c) 2006, 2008 Junio C Hamano
+#
+# The "pre-rebase" hook is run just before "git rebase" starts doing
+# its job, and can prevent the command from running by exiting with
+# non-zero status.
+#
+# The hook is called with the following parameters:
+#
+# $1 -- the upstream the series was forked from.
+# $2 -- the branch being rebased (or empty when rebasing the current branch).
+#
+# This sample shows how to prevent topic branches that are already
+# merged to 'next' branch from getting rebased, because allowing it
+# would result in rebasing already published history.
+
+publish=next
+basebranch="$1"
+if test "$#" = 2
+then
+	topic="refs/heads/$2"
+else
+	topic=`git symbolic-ref HEAD` ||
+	exit 0 ;# we do not interrupt rebasing detached HEAD
+fi
+
+case "$topic" in
+refs/heads/??/*)
+	;;
+*)
+	exit 0 ;# we do not interrupt others.
+	;;
+esac
+
+# Now we are dealing with a topic branch being rebased
+# on top of master.  Is it OK to rebase it?
+
+# Does the topic really exist?
+git show-ref -q "$topic" || {
+	echo >&2 "No such branch $topic"
+	exit 1
+}
+
+# Is topic fully merged to master?
+not_in_master=`git rev-list --pretty=oneline ^master "$topic"`
+if test -z "$not_in_master"
+then
+	echo >&2 "$topic is fully merged to master; better remove it."
+	exit 1 ;# we could allow it, but there is no point.
+fi
+
+# Is topic ever merged to next?  If so you should not be rebasing it.
+only_next_1=`git rev-list ^master "^$topic" ${publish} | sort`
+only_next_2=`git rev-list ^master           ${publish} | sort`
+if test "$only_next_1" = "$only_next_2"
+then
+	not_in_topic=`git rev-list "^$topic" master`
+	if test -z "$not_in_topic"
+	then
+		echo >&2 "$topic is already up to date with master"
+		exit 1 ;# we could allow it, but there is no point.
+	else
+		exit 0
+	fi
+else
+	not_in_next=`git rev-list --pretty=oneline ^${publish} "$topic"`
+	/usr/bin/perl -e '
+		my $topic = $ARGV[0];
+		my $msg = "* $topic has commits already merged to public branch:\n";
+		my (%not_in_next) = map {
+			/^([0-9a-f]+) /;
+			($1 => 1);
+		} split(/\n/, $ARGV[1]);
+		for my $elem (map {
+				/^([0-9a-f]+) (.*)$/;
+				[$1 => $2];
+			} split(/\n/, $ARGV[2])) {
+			if (!exists $not_in_next{$elem->[0]}) {
+				if ($msg) {
+					print STDERR $msg;
+					undef $msg;
+				}
+				print STDERR " $elem->[1]\n";
+			}
+		}
+	' "$topic" "$not_in_next" "$not_in_master"
+	exit 1
+fi
+
+<<\DOC_END
+
+This sample hook safeguards topic branches that have been
+published from being rewound.
+
+The workflow assumed here is:
+
+ * Once a topic branch forks from "master", "master" is never
+   merged into it again (either directly or indirectly).
+
+ * Once a topic branch is fully cooked and merged into "master",
+   it is deleted.  If you need to build on top of it to correct
+   earlier mistakes, a new topic branch is created by forking at
+   the tip of the "master".  This is not strictly necessary, but
+   it makes it easier to keep your history simple.
+
+ * Whenever you need to test or publish your changes to topic
+   branches, merge them into "next" branch.
+
+The script, being an example, hardcodes the publish branch name
+to be "next", but it is trivial to make it configurable via
+$GIT_DIR/config mechanism.
+
+With this workflow, you would want to know:
+
+(1) ... if a topic branch has ever been merged to "next".  Young
+    topic branches can have stupid mistakes you would rather
+    clean up before publishing, and things that have not been
+    merged into other branches can be easily rebased without
+    affecting other people.  But once it is published, you would
+    not want to rewind it.
+
+(2) ... if a topic branch has been fully merged to "master".
+    Then you can delete it.  More importantly, you should not
+    build on top of it -- other people may already want to
+    change things related to the topic as patches against your
+    "master", so if you need further changes, it is better to
+    fork the topic (perhaps with the same name) afresh from the
+    tip of "master".
+
+Let's look at this example:
+
+		   o---o---o---o---o---o---o---o---o---o "next"
+		  /       /           /           /
+		 /   a---a---b A     /           /
+		/   /               /           /
+	       /   /   c---c---c---c B         /
+	      /   /   /             \         /
+	     /   /   /   b---b C     \       /
+	    /   /   /   /             \     /
+    ---o---o---o---o---o---o---o---o---o---o---o "master"
+
+
+A, B and C are topic branches.
+
+ * A has one fix since it was merged up to "next".
+
+ * B has finished.  It has been fully merged up to "master" and "next",
+   and is ready to be deleted.
+
+ * C has not merged to "next" at all.
+
+We would want to allow C to be rebased, refuse A, and encourage
+B to be deleted.
+
+To compute (1):
+
+	git rev-list ^master ^topic next
+	git rev-list ^master        next
+
+	if these match, topic has not merged in next at all.
+
+To compute (2):
+
+	git rev-list master..topic
+
+	if this is empty, it is fully merged to "master".
+
+DOC_END
+
+--- .git\hooks\pre-receive.sample ---
+#!/bin/sh
+#
+# An example hook script to make use of push options.
+# The example simply echoes all push options that start with 'echoback='
+# and rejects all pushes when the "reject" push option is used.
+#
+# To enable this hook, rename this file to "pre-receive".
+
+if test -n "$GIT_PUSH_OPTION_COUNT"
+then
+	i=0
+	while test "$i" -lt "$GIT_PUSH_OPTION_COUNT"
+	do
+		eval "value=\$GIT_PUSH_OPTION_$i"
+		case "$value" in
+		echoback=*)
+			echo "echo from the pre-receive-hook: ${value#*=}" >&2
+			;;
+		reject)
+			exit 1
+		esac
+		i=$((i + 1))
+	done
+fi
+
+--- .git\hooks\prepare-commit-msg.sample ---
+#!/bin/sh
+#
+# An example hook script to prepare the commit log message.
+# Called by "git commit" with the name of the file that has the
+# commit message, followed by the description of the commit
+# message's source.  The hook's purpose is to edit the commit
+# message file.  If the hook fails with a non-zero status,
+# the commit is aborted.
+#
+# To enable this hook, rename this file to "prepare-commit-msg".
+
+# This hook includes three examples. The first one removes the
+# "# Please enter the commit message..." help message.
+#
+# The second includes the output of "git diff --name-status -r"
+# into the message, just before the "git status" output.  It is
+# commented because it doesn't cope with --amend or with squashed
+# commits.
+#
+# The third example adds a Signed-off-by line to the message, that can
+# still be edited.  This is rarely a good idea.
+
+COMMIT_MSG_FILE=$1
+COMMIT_SOURCE=$2
+SHA1=$3
+
+/usr/bin/perl -i.bak -ne 'print unless(m/^. Please enter the commit message/..m/^#$/)' "$COMMIT_MSG_FILE"
+
+# case "$COMMIT_SOURCE,$SHA1" in
+#  ,|template,)
+#    /usr/bin/perl -i.bak -pe '
+#       print "\n" . `git diff --cached --name-status -r`
+# 	 if /^#/ && $first++ == 0' "$COMMIT_MSG_FILE" ;;
+#  *) ;;
+# esac
+
+# SOB=$(git var GIT_COMMITTER_IDENT | sed -n 's/^\(.*>\).*$/Signed-off-by: \1/p')
+# git interpret-trailers --in-place --trailer "$SOB" "$COMMIT_MSG_FILE"
+# if test -z "$COMMIT_SOURCE"
+# then
+#   /usr/bin/perl -i.bak -pe 'print "\n" if !$first_line++' "$COMMIT_MSG_FILE"
+# fi
+
+--- .git\hooks\push-to-checkout.sample ---
+#!/bin/sh
+
+# An example hook script to update a checked-out tree on a git push.
+#
+# This hook is invoked by git-receive-pack(1) when it reacts to git
+# push and updates reference(s) in its repository, and when the push
+# tries to update the branch that is currently checked out and the
+# receive.denyCurrentBranch configuration variable is set to
+# updateInstead.
+#
+# By default, such a push is refused if the working tree and the index
+# of the remote repository has any difference from the currently
+# checked out commit; when both the working tree and the index match
+# the current commit, they are updated to match the newly pushed tip
+# of the branch. This hook is to be used to override the default
+# behaviour; however the code below reimplements the default behaviour
+# as a starting point for convenient modification.
+#
+# The hook receives the commit with which the tip of the current
+# branch is going to be updated:
+commit=$1
+
+# It can exit with a non-zero status to refuse the push (when it does
+# so, it must not modify the index or the working tree).
+die () {
+	echo >&2 "$*"
+	exit 1
+}
+
+# Or it can make any necessary changes to the working tree and to the
+# index to bring them to the desired state when the tip of the current
+# branch is updated to the new commit, and exit with a zero status.
+#
+# For example, the hook can simply run git read-tree -u -m HEAD "$1"
+# in order to emulate git fetch that is run in the reverse direction
+# with git push, as the two-tree form of git read-tree -u -m is
+# essentially the same as git switch or git checkout that switches
+# branches while keeping the local changes in the working tree that do
+# not interfere with the difference between the branches.
+
+# The below is a more-or-less exact translation to shell of the C code
+# for the default behaviour for git's push-to-checkout hook defined in
+# the push_to_deploy() function in builtin/receive-pack.c.
+#
+# Note that the hook will be executed from the repository directory,
+# not from the working tree, so if you want to perform operations on
+# the working tree, you will have to adapt your code accordingly, e.g.
+# by adding "cd .." or using relative paths.
+
+if ! git update-index -q --ignore-submodules --refresh
+then
+	die "Up-to-date check failed"
+fi
+
+if ! git diff-files --quiet --ignore-submodules --
+then
+	die "Working directory has unstaged changes"
+fi
+
+# This is a rough translation of:
+#
+#   head_has_history() ? "HEAD" : EMPTY_TREE_SHA1_HEX
+if git cat-file -e HEAD 2>/dev/null
+then
+	head=HEAD
+else
+	head=$(git hash-object -t tree --stdin </dev/null)
+fi
+
+if ! git diff-index --quiet --cached --ignore-submodules $head --
+then
+	die "Working directory has staged changes"
+fi
+
+if ! git read-tree -u -m "$commit"
+then
+	die "Could not update working tree to new HEAD"
+fi
+
+--- .git\hooks\sendemail-validate.sample ---
+#!/bin/sh
+
+# An example hook script to validate a patch (and/or patch series) before
+# sending it via email.
+#
+# The hook should exit with non-zero status after issuing an appropriate
+# message if it wants to prevent the email(s) from being sent.
+#
+# To enable this hook, rename this file to "sendemail-validate".
+#
+# By default, it will only check that the patch(es) can be applied on top of
+# the default upstream branch without conflicts in a secondary worktree. After
+# validation (successful or not) of the last patch of a series, the worktree
+# will be deleted.
+#
+# The following config variables can be set to change the default remote and
+# remote ref that are used to apply the patches against:
+#
+#   sendemail.validateRemote (default: origin)
+#   sendemail.validateRemoteRef (default: HEAD)
+#
+# Replace the TODO placeholders with appropriate checks according to your
+# needs.
+
+validate_cover_letter () {
+	file="$1"
+	# TODO: Replace with appropriate checks (e.g. spell checking).
+	true
+}
+
+validate_patch () {
+	file="$1"
+	# Ensure that the patch applies without conflicts.
+	git am -3 "$file" || return
+	# TODO: Replace with appropriate checks for this patch
+	# (e.g. checkpatch.pl).
+	true
+}
+
+validate_series () {
+	# TODO: Replace with appropriate checks for the whole series
+	# (e.g. quick build, coding style checks, etc.).
+	true
+}
+
+# main -------------------------------------------------------------------------
+
+if test "$GIT_SENDEMAIL_FILE_COUNTER" = 1
+then
+	remote=$(git config --default origin --get sendemail.validateRemote) &&
+	ref=$(git config --default HEAD --get sendemail.validateRemoteRef) &&
+	worktree=$(mktemp --tmpdir -d sendemail-validate.XXXXXXX) &&
+	git worktree add -fd --checkout "$worktree" "refs/remotes/$remote/$ref" &&
+	git config --replace-all sendemail.validateWorktree "$worktree"
+else
+	worktree=$(git config --get sendemail.validateWorktree)
+fi || {
+	echo "sendemail-validate: error: failed to prepare worktree" >&2
+	exit 1
+}
+
+unset GIT_DIR GIT_WORK_TREE
+cd "$worktree" &&
+
+if grep -q "^diff --git " "$1"
+then
+	validate_patch "$1"
+else
+	validate_cover_letter "$1"
+fi &&
+
+if test "$GIT_SENDEMAIL_FILE_COUNTER" = "$GIT_SENDEMAIL_FILE_TOTAL"
+then
+	git config --unset-all sendemail.validateWorktree &&
+	trap 'git worktree remove -ff "$worktree"' EXIT &&
+	validate_series
+fi
+
+--- .git\hooks\update.sample ---
+#!/bin/sh
+#
+# An example hook script to block unannotated tags from entering.
+# Called by "git receive-pack" with arguments: refname sha1-old sha1-new
+#
+# To enable this hook, rename this file to "update".
+#
+# Config
+# ------
+# hooks.allowunannotated
+#   This boolean sets whether unannotated tags will be allowed into the
+#   repository.  By default they won't be.
+# hooks.allowdeletetag
+#   This boolean sets whether deleting tags will be allowed in the
+#   repository.  By default they won't be.
+# hooks.allowmodifytag
+#   This boolean sets whether a tag may be modified after creation. By default
+#   it won't be.
+# hooks.allowdeletebranch
+#   This boolean sets whether deleting branches will be allowed in the
+#   repository.  By default they won't be.
+# hooks.denycreatebranch
+#   This boolean sets whether remotely creating branches will be denied
+#   in the repository.  By default this is allowed.
+#
+
+# --- Command line
+refname="$1"
+oldrev="$2"
+newrev="$3"
+
+# --- Safety check
+if [ -z "$GIT_DIR" ]; then
+	echo "Don't run this script from the command line." >&2
+	echo " (if you want, you could supply GIT_DIR then run" >&2
+	echo "  $0 <ref> <oldrev> <newrev>)" >&2
+	exit 1
+fi
+
+if [ -z "$refname" -o -z "$oldrev" -o -z "$newrev" ]; then
+	echo "usage: $0 <ref> <oldrev> <newrev>" >&2
+	exit 1
+fi
+
+# --- Config
+allowunannotated=$(git config --type=bool hooks.allowunannotated)
+allowdeletebranch=$(git config --type=bool hooks.allowdeletebranch)
+denycreatebranch=$(git config --type=bool hooks.denycreatebranch)
+allowdeletetag=$(git config --type=bool hooks.allowdeletetag)
+allowmodifytag=$(git config --type=bool hooks.allowmodifytag)
+
+# check for no description
+projectdesc=$(sed -e '1q' "$GIT_DIR/description")
+case "$projectdesc" in
+"Unnamed repository"* | "")
+	echo "*** Project description file hasn't been set" >&2
+	exit 1
+	;;
+esac
+
+# --- Check types
+# if $newrev is 0000...0000, it's a commit to delete a ref.
+zero=$(git hash-object --stdin </dev/null | tr '[0-9a-f]' '0')
+if [ "$newrev" = "$zero" ]; then
+	newrev_type=delete
+else
+	newrev_type=$(git cat-file -t $newrev)
+fi
+
+case "$refname","$newrev_type" in
+	refs/tags/*,commit)
+		# un-annotated tag
+		short_refname=${refname##refs/tags/}
+		if [ "$allowunannotated" != "true" ]; then
+			echo "*** The un-annotated tag, $short_refname, is not allowed in this repository" >&2
+			echo "*** Use 'git tag [ -a | -s ]' for tags you want to propagate." >&2
+			exit 1
+		fi
+		;;
+	refs/tags/*,delete)
+		# delete tag
+		if [ "$allowdeletetag" != "true" ]; then
+			echo "*** Deleting a tag is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/tags/*,tag)
+		# annotated tag
+		if [ "$allowmodifytag" != "true" ] && git rev-parse $refname > /dev/null 2>&1
+		then
+			echo "*** Tag '$refname' already exists." >&2
+			echo "*** Modifying a tag is not allowed in this repository." >&2
+			exit 1
+		fi
+		;;
+	refs/heads/*,commit)
+		# branch
+		if [ "$oldrev" = "$zero" -a "$denycreatebranch" = "true" ]; then
+			echo "*** Creating a branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/heads/*,delete)
+		# delete branch
+		if [ "$allowdeletebranch" != "true" ]; then
+			echo "*** Deleting a branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/remotes/*,commit)
+		# tracking branch
+		;;
+	refs/remotes/*,delete)
+		# delete tracking branch
+		if [ "$allowdeletebranch" != "true" ]; then
+			echo "*** Deleting a tracking branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	*)
+		# Anything else (is there anything else?)
+		echo "*** Update hook: unknown type of update to ref $refname of type $newrev_type" >&2
+		exit 1
+		;;
+esac
+
+# --- Finished
+exit 0
+
+--- .git\index ---
+[binary or unreadable]
+
+--- .git\info\exclude ---
+# git ls-files --others --exclude-from=.git/info/exclude
+# Lines that start with '#' are comments.
+# For a project mostly in C, the following would be a good set of
+# exclude patterns (uncomment them if you want to use them):
+# *.[oa]
+# *~
+
+--- .git\objects\be\31010eb61cc4c5a9bf2db1bfe428022f02c68d ---
+[binary or unreadable]
+
+--- .github\workflows\gh-pages.yml ---
+name: Deploy Docs to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          pip install -e .[docs]
+      - name: Build docs
+        run: |
+          sphinx-build -b html docs docs/_build/html
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: docs/_build/html
+
+--- .github\workflows\python-package.yml ---
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-test:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10', '3.11']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          pip install -e .[dev]
+      - name: Lint (ruff)
+        run: ruff avatar_toolkit tests
+      - name: Run tests
+        run: pytest -q
+      - name: Build wheel
+        run: python -m build --wheel
+
+--- .well-known\security.txt ---
+# Layne Intellectual Property vulnerability disclosure
+Contact: mailto:security@layneip.com
+Encryption: https://layneip.com/pgp-key.txt
+Expires: 2025-12-31T23:59:59Z
+Preferred-Languages: en
+
+--- avatar_toolkit\__init__.py ---
+from __future__ import annotations
+
+"""avatar_toolkit/__init__.py - Main package interface.
+
+Responsibilities:
+• Expose main functions of the avatar toolkit
+• Provide package version and exports
+"""
+
+__version__ = "1.0.0"
+__all__ = [
+    "run_single",
+    "DEFAULTS",
+    "launch_gui",
+    "cli_main",
+    "run_batch",
+    "process_image",
+]
+
+from .core import run_single
+from .config import DEFAULTS
+from .gui import launch_gui
+from .cli import main as cli_main
+from .batch import run_batch
+from .processing import process_image
+
+--- avatar_toolkit\assets\logo.png ---
+
+
+--- avatar_toolkit\batch.py ---
+from __future__ import annotations
+
+"""avatar_toolkit/batch.py - Batch processing for all images in a directory.
+
+Responsibilities:
+• Process all image files in a directory using given configuration
+"""
+__version__ = "1.0.0"
+__all__ = ["run_batch"]
+
+import os
+from pathlib import Path
+import logging
+from typing import Any, Union
+from PIL import Image
+from .core import run_single
+
+logger = logging.getLogger(__name__)
+
+def run_batch(
+    input_dir: Union[str, Path],
+    output_dir: Union[str, Path],
+    config: dict[str, Any]
+) -> None:
+    """Process all images in a directory with given config."""
+    os.makedirs(output_dir, exist_ok=True)
+    for filename in os.listdir(input_dir):
+        if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
+            in_path = os.path.join(input_dir, filename)
+            out_name = Path(filename).stem + f"_processed.{config['format'].lower()}"
+            out_path = os.path.join(output_dir, out_name)
+            img = Image.open(in_path).convert("RGBA")
+            run_single(img, out_path, config)
+
+--- avatar_toolkit\cli.py ---
+from __future__ import annotations
+
+"""avatar_toolkit/cli.py - Command-line interface for avatar processing.
+
+Responsibilities:
+• Parse command-line arguments
+• Invoke processing for a single image
+"""
+__version__ = "1.0.0"
+__all__ = ["main"]
+
+import argparse
+from pathlib import Path
+import logging
+
+from PIL import Image
+
+from .core import run_single
+from .config import DEFAULTS
+from .utils import configure_logging
+
+logger = logging.getLogger(__name__)
+
+def main() -> None:
+    """Main CLI entry point."""
+    configure_logging()
+    parser = argparse.ArgumentParser(description="Avatar Generator CLI")
+    parser.add_argument(
+        "--input", type=Path, required=True,
+        help="Input image file"
+    )
+    parser.add_argument(
+        "--output", type=Path, required=True,
+        help="Output file path"
+    )
+    parser.add_argument(
+        "--format",
+        choices=["PNG", "JPEG", "WEBP"],
+        default=DEFAULTS["format"],
+        help="Output image format"
+    )
+    parser.add_argument(
+        "--quality", type=int,
+        default=DEFAULTS["quality"],
+        help="Quality for JPEG/WebP"
+    )
+    parser.add_argument(
+        "--lossless", action="store_true",
+        help="Use lossless WebP encoding"
+    )
+    parser.add_argument(
+        "--grayscale", action="store_true",
+        help="Convert image to grayscale"
+    )
+    parser.add_argument(
+        "--drop-shadow", action="store_true",
+        help="Apply drop shadow to avatar"
+    )
+    parser.add_argument(
+        "--face-detect", action="store_true",
+        help="Enable face detection and auto-crop"
+    )
+    args = parser.parse_args()
+    img = Image.open(args.input).convert("RGBA")
+    config = DEFAULTS.copy()
+    config.update(vars(args))
+    run_single(img, args.output, config)
+
+--- avatar_toolkit\config.py ---
+from __future__ import annotations
+
+"""avatar_toolkit/config.py - Configuration defaults and constants.
+
+Responsibilities:
+• Provide default values for avatar generation
+• Store constants such as default DPI, resize values, and model paths
+"""
+__version__ = "1.0.0"
+__all__ = ["DEFAULTS"]
+
+import cv2
+
+# High-DPI (Retina) display scaling for GUI (Windows-specific)
+try:
+    import ctypes
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Windows 8.1+
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()     # Windows 8.0+
+    except Exception:
+        pass
+
+# Default path to Haar Cascade model for face detection (OpenCV)
+CASCADE_PATH = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+
+DEFAULTS: dict[str, object] = {
+    "width": 1584,        # Output image width (in pixels)
+    "height": 396,        # Output image height (in pixels)
+    "dpi": 144,           # DPI for output (144 for high-res)
+    "bezel": 4,           # Bezel thickness in pixels
+    "oversample": 16,     # Supersample factor for smoothing (reserved)
+    "bg_color": None,     # Background color (None for transparent)
+    "corner_radius": 16,  # Rounded corner radius for mask
+    "grayscale": False,
+    "drop_shadow": True,
+    "retina_scale": 3,    # Scaling factor for retina displays
+    "format": "PNG",
+    "quality": 95,
+    "lossless": True,     # Use lossless WebP by default
+    "output_dir": "output",
+    "face_detect": True,   # Perform face detection and auto-crop by default
+    "auto_crop": False,    # Crop to content bounding box by default
+}
+
+--- avatar_toolkit\core.py ---
+from __future__ import annotations
+
+"""avatar_toolkit/core.py - Core image processing logic for avatar generation.
+
+Responsibilities:
+• Process a single image with given configuration
+• Save or return the processed image
+"""
+__version__ = "1.0.0"
+__all__ = ["run_single"]
+
+import os
+from pathlib import Path
+import logging
+from typing import Optional, Union, Any
+
+from PIL import Image
+
+from .processing import process_image
+from .utils import ensure_dir, configure_logging
+from .config import DEFAULTS
+
+logger = logging.getLogger(__name__)
+
+def run_single(
+    img: Union[str, Image.Image],
+    output_path: Optional[Union[str, Path]],
+    config: dict[str, Any],
+    return_image: bool = False
+) -> Optional[Image.Image]:
+    """Process an image and optionally save or return it."""
+    configure_logging()
+
+    # Load image if file path given
+    if isinstance(img, (str, Path)):
+        image = Image.open(img).convert("RGBA")
+    else:
+        image = img.convert("RGBA")
+
+    # Process image
+    result = process_image(image, config)
+
+    # Save result if output path provided
+    if output_path:
+        out_dir = os.path.dirname(str(output_path)) or "."
+        ensure_dir(out_dir)
+        save_kwargs: dict[str, Any] = {}
+        fmt = config.get("format", DEFAULTS["format"])
+        save_kwargs["format"] = fmt
+        if fmt.upper() in ("JPEG", "WEBP"):
+            save_kwargs["quality"] = config.get("quality", DEFAULTS["quality"])
+            if fmt.upper() == "WEBP":
+                save_kwargs["lossless"] = config.get("lossless", DEFAULTS["lossless"])
+        result.save(output_path, **save_kwargs)
+        logger.info("Saved image: %s", output_path)
+
+    if return_image:
+        return result
+    return None
+
+--- avatar_toolkit\face_detect.py ---
+from __future__ import annotations
+
+"""avatar_toolkit/face_detect.py - Face detection utilities.
+
+Responsibilities:
+• Detect faces in images using Haar cascades
+• Provide utilities for cropping to faces
+"""
+
+__version__ = "1.0.0"
+__all__ = ["FaceDetector"]
+
+import logging
+from pathlib import Path
+from typing import List, Optional, Tuple, Union
+import cv2
+
+logger = logging.getLogger(__name__)
+
+class FaceDetector:
+    """Face detection using OpenCV Haar cascades."""
+
+    def __init__(
+        self,
+        model_path: Optional[Union[str, Path]] = None,
+        scale_factor: float = 1.1,
+        min_neighbors: int = 5,
+    ) -> None:
+        """
+        Initialize the face detector.
+
+        Args:
+            model_path: Path to Haar cascade XML file. If None, use default frontal face cascade.
+            scale_factor: How much the image size is reduced at each scale.
+            min_neighbors: How many neighbors each rectangle should have to retain it.
+        """
+        if model_path:
+            cascade_file = str(model_path)
+        else:
+            cascade_file = (
+                cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            )
+        self.classifier = cv2.CascadeClassifier(cascade_file)
+        if self.classifier.empty():
+            logger.error(
+                "Failed to load face detector model from %s", cascade_file
+            )
+            raise ValueError(
+                f"Failed to load face detector model from {cascade_file}"
+            )
+        self.scale_factor = scale_factor
+        self.min_neighbors = min_neighbors
+        logger.info("Loaded face detector model: %s", cascade_file)
+
+    def detect_faces(
+        self, image: Union[str, Path, "cv2.UMat", "cv2.Mat"]
+    ) -> List[Tuple[int, int, int, int]]:
+        """Detect faces in an image and return bounding boxes."""
+        # Load image if path provided
+        if isinstance(image, (str, Path)):
+            img = cv2.imread(str(image))
+        else:
+            img = image
+        if img is None:
+            logger.error("Could not load image for face detection: %s", image)
+            return []
+
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        faces = self.classifier.detectMultiScale(
+            gray,
+            scaleFactor=self.scale_factor,
+            minNeighbors=self.min_neighbors
+        )
+        boxes: List[Tuple[int, int, int, int]] = []
+        for (x, y, w, h) in faces:
+            boxes.append((int(x), int(y), int(w), int(h)))
+        logger.info("Detected %d face(s)", len(boxes))
+        return boxes
+
+    def detect_largest_face(
+        self, image: Union[str, Path, "cv2.UMat", "cv2.Mat"]
+    ) -> Tuple[int, int, int, int]:
+        """Detect the largest face in an image, return (x,y,w,h) or
+        (0,0,0,0) if none."""
+        boxes = self.detect_faces(image)
+        if not boxes:
+            return (0, 0, 0, 0)
+        # Return the box with largest area
+        largest = max(boxes, key=lambda rect: rect[2] * rect[3])
+        return largest
+
+--- avatar_toolkit\gui.py ---
+from __future__ import annotations
+
+"""avatar_toolkit/gui.py - Graphical user interface for the Avatar Generator toolkit.
+
+Responsibilities:
+• Provide a GUI for loading and processing images
+• Support drag-and-drop and file dialogs
+"""
+__version__ = "1.0.0"
+__all__ = ["AvatarApp", "launch_gui"]
+
+import tkinter as tk
+from tkinter import filedialog, messagebox
+import threading
+import logging
+import os
+from tkinterdnd2 import DND_FILES, TkinterDnD
+from PIL import Image, ImageTk
+
+from .core import run_single
+from .config import DEFAULTS
+from .face_detect import FaceDetector
+from .utils import ensure_dir
+
+logger = logging.getLogger(__name__)
+
+class AvatarApp:
+    """Main application class for the Avatar GUI."""
+    def __init__(self) -> None:
+        self.root = TkinterDnD.Tk()
+        self.root.title("Avatar Generator")
+
+        # Widgets
+        self.frame = tk.Frame(self.root)
+        self.frame.pack(fill=tk.BOTH, expand=True)
+
+        self.load_button = tk.Button(
+            self.frame, text="Load Image", command=self.load_image
+        )
+        self.load_button.pack(pady=10)
+
+        self.image_label = tk.Label(self.frame)
+        self.image_label.pack()
+
+        self.process_button = tk.Button(
+            self.frame, text="Generate Avatar", command=self.generate_avatar
+        )
+        self.process_button.pack(pady=10)
+
+        self.status = tk.Label(self.frame, text="", fg="green")
+        self.status.pack(pady=5)
+
+        # Face detector
+        self.detector = FaceDetector()
+
+        # Bind drag-and-drop
+        self.image_label.drop_target_register(DND_FILES)
+        self.image_label.dnd_bind('<<Drop>>', self.on_drop)
+
+        self.loaded_image: Image.Image | None = None
+        self.result_image: Image.Image | None = None
+
+    def load_image(self) -> None:
+        """Open file dialog to select an image."""
+        file_path = filedialog.askopenfilename(
+            filetypes=[("Image files", "*.png *.jpg *.jpeg *.webp")]
+        )
+        if not file_path:
+            return
+        self._display_image(file_path)
+
+    def on_drop(self, event) -> None:
+        """Handle file dropped onto the GUI."""
+        file_path = event.data.strip('{}')
+        self._display_image(file_path)
+
+    def _display_image(self, file_path: str) -> None:
+        """Display the image in the GUI."""
+        try:
+            img = Image.open(file_path)
+        except Exception as e:
+            messagebox.showerror("Error", f"Cannot open image: {e}")
+            return
+        self.loaded_image = img
+        img_tk = ImageTk.PhotoImage(img.resize((300, 300), Image.LANCZOS))
+        self.image_label.configure(image=img_tk)
+        self.image_label.image = img_tk
+        self.status.config(text=f"Loaded {os.path.basename(file_path)}")
+
+    def generate_avatar(self) -> None:
+        """Process the loaded image and display/save the result."""
+        if self.loaded_image is None:
+            messagebox.showwarning("No image", "Please load an image first.")
+            return
+        config = DEFAULTS.copy()
+        avatar = run_single(self.loaded_image, None, config, return_image=True)
+        if avatar is None:
+            return
+        self.result_image = avatar
+        avatar_tk = ImageTk.PhotoImage(
+            avatar.resize((300, 300), Image.LANCZOS)
+        )
+        self.image_label.configure(image=avatar_tk)
+        self.image_label.image = avatar_tk
+        self.status.config(text="Avatar generated")
+
+    def run(self) -> None:
+        """Start the GUI event loop."""
+        self.root.mainloop()
+
+def launch_gui() -> None:
+    """Launch the GUI application."""
+    app = AvatarApp()
+    app.run()
+
+--- avatar_toolkit\processing.py ---
+from __future__ import annotations
+
+"""avatar_toolkit/processing.py - Image processing routines.
+
+Responsibilities:
+• Create circular masks and apply bezels to images
+• Core image processing pipeline for avatar generation
+"""
+__version__ = "1.0.0"
+__all__ = [
+    "create_circular_mask",
+    "create_dual_bezel",
+    "process_image",
+]
+
+import logging
+from PIL import Image, ImageDraw, ImageFilter
+
+logger = logging.getLogger(__name__)
+
+def create_circular_mask(width: int, height: int) -> Image.Image:
+    """Create a circular mask for an image of given width and height."""
+    mask = Image.new("L", (width, height), 0)
+    draw = ImageDraw.Draw(mask)
+    draw.ellipse((0, 0, width, height), fill=255)
+    return mask
+
+def create_dual_bezel(width: int, height: int, bezel: int) -> Image.Image:
+    """Create a bezel mask: transparent border with size bezel."""
+    mask = Image.new("L", (width, height), 255)
+    if bezel > 0:
+        draw = ImageDraw.Draw(mask)
+        draw.ellipse(
+            (bezel, bezel, width - bezel, height - bezel),
+            fill=0
+        )
+    return mask
+
+def process_image(img: Image.Image, config: dict) -> Image.Image:
+    """Apply mask, bezels, and other effects to create an avatar image."""
+    width, height = img.size
+    output = Image.new("RGBA", (width, height))
+
+    mask = create_circular_mask(width, height)
+    img_rgba = img.convert("RGBA")
+    output.paste(img_rgba, (0, 0), mask)
+
+    # Drop shadow under avatar if requested
+    bezel = config.get("bezel", 0)
+    if config.get("drop_shadow") and bezel > 0:
+        blurred = mask.filter(ImageFilter.GaussianBlur(radius=bezel * 2))
+        shadow_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        shadow_layer.putalpha(blurred)
+        output = Image.alpha_composite(shadow_layer, output)
+
+    # Bezel mask (apply full mask alpha)
+    output.putalpha(mask)
+
+    # Resize according to retina scale
+    retina = config.get("retina_scale", 1)
+    target_w = int(width * retina)
+    target_h = int(height * retina)
+    if target_w > 0 and target_h > 0:
+        output = output.resize((target_w, target_h), Image.LANCZOS)
+
+    # Grayscale if requested
+    if config.get("grayscale"):
+        output = output.convert("L").convert("RGBA")
+
+    return output
+
+--- avatar_toolkit\utils.py ---
+from __future__ import annotations
+
+"""avatar_toolkit/utils.py - Utility functions for file and logging.
+
+Responsibilities:
+• File and path utilities (slugify, ensure directories, etc.)
+• Logging configuration
+"""
+__version__ = "1.0.0"
+__all__ = [
+    "slugify",
+    "ensure_dir",
+    "infer_output_filename",
+    "configure_logging",
+    "is_image_file",
+]
+
+import logging
+from pathlib import Path
+import re
+from typing import Optional, Union
+
+logger = logging.getLogger(__name__)
+
+def configure_logging(level: int = logging.INFO) -> None:
+    """Configure basic logging with default format and level."""
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+
+def slugify(text: str) -> str:
+    """Convert text to a filesystem-safe slug."""
+    return re.sub(r'[^a-zA-Z0-9_-]', '_', text).strip('_').lower()
+
+def ensure_dir(path: str | Path) -> None:
+    """Create a directory if it does not exist."""
+    Path(path).mkdir(parents=True, exist_ok=True)
+
+def infer_output_filename(
+    input_path: str | Path,
+    suffix: str = "_out",
+    ext: Optional[str] = None
+) -> str:
+    """Generate an output filename by appending a suffix to the stem."""
+    p = Path(input_path)
+    new_ext = ext if ext else p.suffix
+    return str(p.with_name(p.stem + suffix).with_suffix(new_ext))
+
+def is_image_file(path: str | Path) -> bool:
+    """Check if the file has a known image extension."""
+    return Path(path).suffix.lower() in {
+        ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"
+    }
+
+--- avatargen.spec ---
+# -*- mode: python ; coding: utf-8 -*-
+block_cipher = None
+
+a = Analysis(['-m', 'avatar_toolkit.cli'], pathex=[], binaries=[], datas=[('avatar_toolkit/assets/*.png', 'avatar_toolkit/assets')], hiddenimports=['tkinterdnd2'], hookspath=[], runtime_hooks=[], excludes=['tkinter'], win_no_prefer_redirects=False, win_private_assemblies=False, cipher=block_cipher)
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='avatargen', console=True)
+coll = COLLECT(exe, a.binaries, a.zipfiles, a.datas, name='avatargen')
+
+--- CODE_OF_CONDUCT.md ---
+[binary or unreadable]
+
+--- CONTRIBUTING.md ---
+[binary or unreadable]
+
+--- docs\api.rst ---
+.. docs/api.rst
+
+API Reference
+=============
+
+.. automodule:: avatargen.config
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: avatargen.core
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: avatargen.cli
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: avatargen.gui
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: avatargen.batch
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: avatargen.processing
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+--- docs\conf.py ---
+
+
+--- docs\index.rst ---
+.. avatar-toolkit documentation master file
+
+Avatar Toolkit
+==============
+
+A modular CLI/GUI image transformation tool for avatars and banners.
+
+Contents:
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Documentation
+
+   usage
+   api
+
+Indices and tables
+==================
+
+* :ref:`genindex`
+* :ref:`modindex`
+* :ref:`search`
+
+--- docs\usage.rst ---
+.. docs/usage.rst
+
+Usage Guide
+===========
+
+Command-Line Interface (CLI)
+----------------------------
+To run the tool from the command line:
+
+.. code-block:: bash
+
+   avatargen --url "https://example.com/image.jpg" --output out.png --bezel 4 --drop-shadow --retina-scale 2
+
+GUI Interface
+-------------
+To launch the graphical interface:
+
+.. code-block:: bash
+
+   python -m avatargen.gui
+
+You can select an image, preview the output in real time, and export the final image with optional settings.
+
+Batch Processing
+----------------
+To process an entire folder:
+
+.. code-block:: bash
+
+   python -m avatargen.batch --input-dir ./images --output-dir ./out --config config.json
+
+Drag-and-Drop
+-------------
+The GUI supports drag-and-drop for quick image loading.
+
+Face Detection
+--------------
+By default, if OpenCV is installed, the tool attempts to crop to the face region before processing. This can be disabled with `--no-face-detect`.
+
+Customization
+-------------
+Most parameters can be tuned:
+
+- ``--bezel``: Width of the circular or rounded bezel
+- ``--corner-radius``: Controls roundness of rectangles
+- ``--drop-shadow``: Enables soft shadows
+- ``--retina-scale``: Outputs Retina versions (e.g., @2x)
+- ``--format``: Choose from PNG, JPEG, WEBP, etc.
+
+For advanced use, modify the default settings in `config.py`.
+
+--- examples\demo_avatar.py ---
+
+
+--- install.bat ---
+[binary or unreadable]
+
+--- install.sh ---
+[binary or unreadable]
+
+--- LICENSE ---
+[binary or unreadable]
+
+--- Makefile ---
+.PHONY: install lint test docs build exe clean
+
+install:
+	pip install -e .[dev]
+
+lint:
+	ruff avatar_toolkit tests
+
+format:
+	black avatar_toolkit tests
+
+test:
+	pytest -q
+
+docs:
+	sphinx-build -b html docs docs/_build/html
+
+build:
+	python -m build
+
+exe:
+	pyinstaller avatar_toolkit.spec
+
+clean:
+	rm -rf build dist *.egg-info docs/_build
+
+--- MANIFEST.in ---
+[binary or unreadable]
+
+--- pyproject.toml ---
+[project]
+name        = "avatar-toolkit"
+version     = "1.0.0"
+description = "Fast CLI + GUI toolkit for cropping faces and generating polished avatars."
+readme      = "README.md"
+authors     = [{ name = "Robert M. Layne, Ph.D.", email = "robert@layneip.tech" }]
+license     = { file = "LICENSE" }
+requires-python = ">=3.9"
+
+dependencies = [
+  "opencv-python-headless>=4.9.0.80",
+  "Pillow>=10.0.0",
+  "numpy>=1.24.4",
+  "tkinterdnd2>=0.3.0"   # optional drag-and-drop; ignored on headless servers
+]
+
+[project.optional-dependencies]
+dev  = ["pytest", "pytest-cov", "black", "ruff", "pyinstaller", "PyYAML"]
+
+[project.scripts]
+avatargen = "avatar_toolkit.cli:main"
+
+[tool.setuptools]
+include-package-data = true          # make MANIFEST.in rules effective
+package-dir = {"" = "."}
+packages = ["avatar_toolkit"]
+
+[tool.setuptools.package-data]
+avatar_toolkit = ["assets/*.png"]
+
+[tool.black]
+line-length = 88
+
+[tool.ruff]
+line-length = 88
+
+[build-system]
+requires = ["setuptools>=69.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+--- README.md ---
+[binary or unreadable]
+
+--- requirements.txt ---
+# Explicit runtime dependencies
+opencv-python-headless>=4.5.0
+Pillow>=9.0.0
+tkinterdnd2>=0.3.0
+
+--- root.py ---
+from pathlib import Path
+
+for path in sorted(Path(".").rglob("*")):
+    if path.is_file():
+        print(f"\n--- {path} ---")
+        try:
+            content = path.read_text(encoding="utf-8").strip()
+            print(content)
+        except Exception:
+            print("[binary or unreadable]")
+
+--- scripts\batch_convert.py ---
+#!/usr/bin/env python
+"""Standalone script to convert all images in a directory into avatars."""
+import sys
+from avatar_toolkit import batch
+
+if __name__ == "__main__":
+    if len(sys.argv) < 3:
+        print("Usage: python batch_convert.py <input_dir> <output_dir>")
+        sys.exit(1)
+    input_dir = sys.argv[1]
+    output_dir = sys.argv[2]
+    try:
+        batch.process_directory(input_dir, output_dir)
+        print(f"Batch processing complete. Avatars saved to: {output_dir}")
+    except Exception as e:
+        print(f"Error in batch conversion: {e}")
+
+--- scripts\generate_avatar.py ---
+#!/usr/bin/env python
+"""Standalone script to generate a single avatar from an image file."""
+import sys
+from avatar_toolkit import core
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python generate_avatar.py <input_image> [output_image]")
+        sys.exit(1)
+    input_path = sys.argv[1]
+    output_path = sys.argv[2] if len(sys.argv) > 2 else None
+    try:
+        result = core.generate_avatar_file(input_path, output_path)
+        print(f"Avatar saved to: {result}")
+    except Exception as e:
+        print(f"Error generating avatar: {e}")
+
+--- SECURITY.md ---
+# Security Policy
+
+* **Contact:** security@layneip.com  
+* **PGP:** https://layneip.com/pgp-key.txt  
+* **Response target:** We aim to acknowledge reports within 48 hours.
+
+--- setup.cfg ---
+[metadata]
+name = avatar-toolkit
+version = 1.0.0
+description = Fast CLI + GUI avatar generator
+long_description = file: README.md
+long_description_content_type = text/markdown
+license = MIT
+author = Robert M. Layne, Ph.D.
+
+[options]
+packages = find:
+python_requires = >=3.9
+include_package_data = True
+install_requires =
+    opencv-python-headless>=4.9.0.80
+    Pillow>=10.0.0
+    numpy>=1.24.4
+    tkinterdnd2>=0.3.0
+
+[options.entry_points]
+console_scripts =
+    avatargen = avatar_toolkit.cli:main
+
+--- structure.txt ---
+[binary or unreadable]
+
+--- SUPPORT.md ---
+# Support
+
+* **User support:** support@layneip.com  
+* **General inquiries:** contact@layneip.com  
+Please open GitHub issues for bug reports.
+
+--- tests\__init__.py ---
+
+
+--- tests\test_batch.py ---
+
+
+--- tests\test_cli.py ---
+
+
+--- tests\test_core.py ---
+# tests/test_core.py
+import os
+import unittest
+from PIL import Image
+from avatargen.core import run_single
+from avatargen.config import DEFAULTS
+
+class TestCoreProcessing(unittest.TestCase):
+    def setUp(self):
+        self.img = Image.new("RGB", (512, 512), color="blue")
+        self.output_path = "test_output.png"
+        self.config = DEFAULTS.copy()
+        self.config["bezel"] = 4
+        self.config["output_format"] = "PNG"
+
+    def tearDown(self):
+        if os.path.exists(self.output_path):
+            os.remove(self.output_path)
+
+    def test_run_single_generates_output(self):
+        run_single(self.img, self.output_path, self.config)
+        self.assertTrue(os.path.exists(self.output_path))
+
+if __name__ == "__main__":
+    unittest.main()
+
+--- tests\test_face_detect.py ---
+# tests/test_face_detect.py
+import unittest
+import numpy as np
+import cv2
+from avatar_toolkit.face_detect import detect_face
+
+class TestFaceDetection(unittest.TestCase):
+    def test_detect_face_no_face(self):
+        blank = np.zeros((200, 200, 3), dtype=np.uint8)
+        x, y, w, h = detect_face(blank)
+        self.assertEqual((x, y, w, h), (0, 0, 200, 200))
+
+--- tests\test_gui_mock.py ---
+# tests/test_gui_mock.py
+import unittest
+import tkinter as tk
+from unittest.mock import patch, MagicMock
+from avatar_toolkit.gui import AvatarApp
+
+class TestGuiDrop(unittest.TestCase):
+    @patch("tkinter.Tk")
+    def test_gui_initializes(self, mock_tk):
+        mock_root = MagicMock(spec=tk.Tk)
+        mock_tk.return_value = mock_root
+        app = AvatarApp(mock_root)
+        self.assertIsNotNone(app)
+
+--- tests\test_processing.py ---
+
+
+--- THIRD_PARTY_NOTICES ---
+[binary or unreadable]

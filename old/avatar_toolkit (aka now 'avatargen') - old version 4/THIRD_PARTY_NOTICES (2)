@@ -1,0 +1,4 @@
+This project bundles:
+* Pillow (PIL Fork) – MIT
+* OpenCV‑python‑headless – Apache‐2.0
+See `pip show` output for full licenses.

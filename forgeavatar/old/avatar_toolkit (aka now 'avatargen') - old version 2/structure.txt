@@ -1,0 +1,66 @@
+Folder PATH listing for volume OS
+Volume serial number is 2EBA-0438
+C:\DEV\PROJECTS\AVATAR_TOOLKIT
+¦   avatar_toolkit.spec
+¦   CODE_OF_CONDUCT.md
+¦   CONTRIBUTING.md
+¦   install.bat
+¦   install.sh
+¦   LICENSE
+¦   Makefile
+¦   MANIFEST.in
+¦   pyproject.toml
+¦   README.md
+¦   requirements.txt
+¦   root.py
+¦   SECURITY.md
+¦   setup.cfg
+¦   structure.txt
+¦   SUPPORT.md
+¦   THIRD_PARTY_NOTICES
+¦   
++---.github
+¦   +---workflows
+¦           gh-pages.yml
+¦           python-package.yml
+¦           
++---.well-known
+¦       security.txt
+¦       
++---avatar_toolkit
+¦   ¦   batch.py
+¦   ¦   cli.py
+¦   ¦   config.py
+¦   ¦   core.py
+¦   ¦   face_detect.py
+¦   ¦   gui.py
+¦   ¦   processing.py
+¦   ¦   utils.py
+¦   ¦   __init__.py
+¦   ¦   
+¦   +---assets
+¦           logo.png
+¦           
++---docs
+¦       api.rst
+¦       conf.py
+¦       index.rst
+¦       usage.rst
+¦       
++---examples
+¦       demo_avatar.py
+¦       examples
+¦       
++---scripts
+¦       batch_convert.py
+¦       generate_avatar.py
+¦       
++---tests
+        test_batch.py
+        test_cli.py
+        test_core.py
+        test_face_detect.py
+        test_gui_mock.py
+        test_processing.py
+        __init__.py
+        

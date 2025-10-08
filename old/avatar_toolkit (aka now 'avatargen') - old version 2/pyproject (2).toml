@@ -1,0 +1,39 @@
+[project]
+name        = "avatar-toolkit"
+version     = "1.0.0"
+description = "Fast CLI + GUI toolkit for cropping faces and generating polished avatars."
+readme      = "README.md"
+authors     = [{ name = "Robert M. Layne, Ph.D.", email = "robert@layneip.tech" }]
+license     = { file = "LICENSE" }
+requires-python = ">=3.9"
+
+dependencies = [
+  "opencv-python-headless>=4.9.0.80",
+  "Pillow>=10.0.0",
+  "numpy>=1.24.4",
+  "tkinterdnd2>=0.3.0"   # optional drag-and-drop; ignored on headless servers
+]
+
+[project.optional-dependencies]
+dev  = ["pytest", "pytest-cov", "black", "ruff", "pyinstaller", "PyYAML"]
+
+[project.scripts]
+avatargen = "avatar_toolkit.cli:main"
+
+[tool.setuptools]
+include-package-data = true          # make MANIFEST.in rules effective
+package-dir = {"" = "."}
+packages = ["avatar_toolkit"]
+
+[tool.setuptools.package-data]
+avatar_toolkit = ["assets/*.png"]
+
+[tool.black]
+line-length = 88
+
+[tool.ruff]
+line-length = 88
+
+[build-system]
+requires = ["setuptools>=69.0", "wheel"]
+build-backend = "setuptools.build_meta"

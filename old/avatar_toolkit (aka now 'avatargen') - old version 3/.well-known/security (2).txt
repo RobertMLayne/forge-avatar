@@ -1,0 +1,5 @@
+# Layne Intellectual Property vulnerability disclosure
+Contact: mailto:security@layneip.com
+Encryption: https://layneip.com/pgp-key.txt
+Expires: 2025-12-31T23:59:59Z
+Preferred-Languages: en

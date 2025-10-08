@@ -1,0 +1,54 @@
+\##############################################################################
+
+# Avatar Toolkit – MANIFEST.in
+
+# Defines exactly which files are shipped in the sdist and, via
+
+# \[tool.setuptools] include-package-data = true,
+
+# included in wheels.  Keep lightweight but reproducible.
+
+\##############################################################################
+
+# ─── Core project metadata ──────────────────────────────────────────────────
+
+include README.md
+include LICENSE
+include pyproject.toml
+include setup.cfg
+include Makefile
+include avatar\_toolkit.spec
+
+# ─── Source package ─────────────────────────────────────────────────────────
+
+# Grab the package directory and its data (assets/\*.png)
+
+recursive-include avatar\_toolkit \*.py \*.png
+prune avatar\_toolkit/**pycache**
+
+# ─── Docs (source only, no built HTML) ──────────────────────────────────────
+
+recursive-include docs \*.rst \*.py
+prune docs/\_build
+
+# ─── Tests (encourage downstream testing) ──────────────────────────────────
+
+recursive-include tests \*.py
+
+# ─── GitHub workflows  (handy reference) ────────────────────────────────────
+
+recursive-include .github \*.yml
+
+# ─── Extra configs / data ───────────────────────────────────────────────────
+
+global-include \*.json \*.yaml \*.yml
+
+# ─── Universal exclusions  ─────────────────────────────────────────────────
+
+# Remove artifacts & editor cruft
+
+global-exclude **pycache** \*.py\[cod] \*.so \*.pyd
+global-exclude .DS\_Store Thumbs.db \*\~ \*.orig
+prune build
+prune dist
+prune \*.egg-info
