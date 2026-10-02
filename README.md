@@ -2,6 +2,13 @@
 
 Remaster tiny, blurry profile pictures into studio-quality avatars.
 
+This preserved source repository has incomplete packaging and documentation
+scaffolds. Its historical GitHub Actions files were empty; automated wheels,
+Windows EXE builds and documentation deployment are unverified. Read the
+[workflow status](docs/WORKFLOW-STATUS.md) and the maintained
+[Avatar Suite feature coverage](https://github.com/RobertMLayne/avatar-suite/blob/main/docs/FEATURE-COVERAGE.md)
+before relying on the build or platform claims below.
+
 | Windows 11 | macOS | Linux |
 | ---------- | ----- | ----- |
 | ✅ first-class | ✅ | ✅ |
@@ -16,7 +23,7 @@ Remaster tiny, blurry profile pictures into studio-quality avatars.
 * Gold-black-gold bezel, rounded-rectangle mask, drop shadow
 * Drag-and-drop GUI with live preview
 * Threaded batch mode
-* Wheels, PyInstaller EXE, and docs deploy via GitHub Actions
+* Wheels, PyInstaller EXE, and docs deployment remain unresolved
 
 ---
 
